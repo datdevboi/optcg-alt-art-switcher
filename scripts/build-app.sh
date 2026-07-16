@@ -5,14 +5,36 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 # ── 1. Compile ────────────────────────────────────────────────────────────────
-echo "▶ Building release binary…"
-swift build -c release
+# Set ARCHS="arm64 x86_64" for a universal release. Local builds default to the
+# current machine's architecture so they work with Command Line Tools alone.
+ARCHS="${ARCHS:-$(uname -m)}"
+VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION#v}"
+BUILD_ROOT="$ROOT/.build/release-architectures"
+BINARIES=()
+
+rm -rf "$BUILD_ROOT"
+for ARCH in ${(z)ARCHS}; do
+    echo "▶ Building $ARCH release binary…"
+    ARCH_BUILD="$BUILD_ROOT/$ARCH"
+    swift build -c release --triple "$ARCH-apple-macosx13.0" --scratch-path "$ARCH_BUILD"
+    BINARIES+=("$ARCH_BUILD/$ARCH-apple-macosx/release/OPTCGAltArtSwitcher")
+done
+
+if (( ${#BINARIES[@]} == 1 )); then
+    APP_BINARY="${BINARIES[1]}"
+else
+    echo "▶ Combining universal binary…"
+    APP_BINARY="$BUILD_ROOT/OPTCGAltArtSwitcher"
+    lipo -create "${BINARIES[@]}" -output "$APP_BINARY"
+fi
 
 # ── 2. Assemble .app bundle ───────────────────────────────────────────────────
 APP="$ROOT/dist/OPTCG Alt Art Switcher.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$ROOT/.build/release/OPTCGAltArtSwitcher" "$APP/Contents/MacOS/OPTCGAltArtSwitcher"
+cp "$APP_BINARY" "$APP/Contents/MacOS/OPTCGAltArtSwitcher"
+cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE.txt"
 
 # ── 3. Generate .icns from bundled PNG ────────────────────────────────────────
 SOURCE_ICON="$ROOT/scripts/AppIcon.png"
@@ -48,28 +70,24 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>com.camiloguerrero.optcg-alt-art-switcher</string>
   <key>CFBundleName</key><string>OPTCG Alt Art Switcher</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+  <key>CFBundleVersion</key><string>${VERSION}</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
 
-# ── 5. Ad-hoc code sign ───────────────────────────────────────────────────────
+# ── 5. Code sign ──────────────────────────────────────────────────────────────
 # Strip resource-fork / Finder xattrs that codesign rejects as 'detritus'
 find "$APP" -exec xattr -c {} \; 2>/dev/null || true
 echo "▶ Signing…"
-codesign --force --sign - "$APP"
-
-# ── 6. Remove Gatekeeper quarantine ──────────────────────────────────────────
-xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
-
-# ── 7. Desktop alias ─────────────────────────────────────────────────────────
-DESKTOP_LINK=~/Desktop/"OPTCG Alt Art Switcher.app"
-rm -f "$DESKTOP_LINK"
-ln -s "$APP" "$DESKTOP_LINK"
-echo "▶ Desktop alias created at $DESKTOP_LINK"
+if [[ -n "${SIGNING_IDENTITY:-}" ]]; then
+    codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP"
+else
+    codesign --force --sign - "$APP"
+fi
+codesign --verify --deep --strict --verbose=2 "$APP"
 
 echo ""
 echo "✅ Built $APP"
-echo "   Double-click the alias on your Desktop to launch."
+echo "   Architectures: $(lipo -archs "$APP/Contents/MacOS/OPTCGAltArtSwitcher")"

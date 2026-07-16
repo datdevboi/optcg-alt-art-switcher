@@ -20,6 +20,7 @@ struct AltArtCoreValidation {
         try validateIncrementalCollectionIndex()
         try validateScopedApply()
         try validateLiveChoiceEditorBinding()
+        try validatePublicDistributionNotices()
         try validateSavedChoiceStability()
         try validateNestedFolderScansBareCardFilenames()
         try validateSmallSourceImagesAreIgnored()
@@ -224,6 +225,20 @@ private func validateLiveChoiceEditorBinding() throws {
     try expect(source.contains("panel.treatsFilePackagesAsDirectories = false"), "The simulator picker must keep app bundles selectable")
     try expect(source.contains("locatedSimulatorAppPath(preferredPath:"), "The app should discover OPTCGSim in Applications before showing a picker")
     try expect(!source.contains("Apply Changes"), "Review must not require a separate apply action")
+}
+
+private func validatePublicDistributionNotices() throws {
+    let repository = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let appSource = try String(contentsOf: repository.appendingPathComponent("Sources/OPTCGAltArtSwitcher/OPTCGAltArtSwitcherApp.swift"), encoding: .utf8)
+    let readme = try String(contentsOf: repository.appendingPathComponent("README.md"), encoding: .utf8)
+    try expect(appSource.contains("Unofficial utility; not affiliated"), "The app must show its unofficial status")
+    try expect(appSource.contains("legally obtained simulator and card-art files"), "The app must explain that users provide their own assets")
+    try expect(readme.contains("## Install on your Mac"), "The README must lead non-developers to installation instructions")
+    try expect(readme.contains("[latest release](../../releases/latest)"), "The README must link users to the latest release")
+    try expect(readme.contains("GNU General Public License v3.0"), "The README must identify the GPLv3 license")
 }
 
 private func validateSavedChoiceStability() throws {

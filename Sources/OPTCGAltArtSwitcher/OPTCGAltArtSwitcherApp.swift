@@ -375,6 +375,11 @@ private struct HybridSidebar: View {
             ReadinessPanel()
             Spacer(minLength: 8)
 
+            Text("Unofficial utility; not affiliated with One Piece, Bandai, or OPTCGSim. Requires your own legally obtained simulator and card-art files.")
+                .font(.caption2)
+                .foregroundStyle(HybridTheme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+
             Button { model.showRestoreConfirmation = true } label: {
                 Label("Restore Originals", systemImage: "arrow.uturn.backward")
                     .frame(maxWidth: .infinity)

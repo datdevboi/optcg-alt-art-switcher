@@ -1,32 +1,63 @@
 # OPTCG Alt Art Switcher
 
-A local macOS utility that reapplies your preferred One Piece TCG Simulator card art after a simulator update.
+**A free, local macOS utility for reapplying your preferred One Piece TCG Simulator card art after a simulator update.** It never uploads your collection or changes the files in your source collection.
 
-## Use
+> **Unofficial software:** OPTCG Alt Art Switcher is not affiliated with, endorsed by, or sponsored by Bandai, One Piece, or OPTCGSim. You must provide your own legally obtained simulator and card-art files. This project does not include or distribute card artwork or the simulator.
 
-1. Run `scripts/build-app.sh`, then double-click `dist/OPTCG Alt Art Switcher.app`.
-2. Confirm the defaults point to your `OP TCG Card Collection` folder and `OPTCGSim.app`.
-3. The app automatically loads the saved collection every time it opens. On first use, choose the collection folder and simulator; those locations and every automatically chosen card are saved right away. After adding or changing artwork files, use **Refresh & Apply**: it discovers new card IDs, saves their built-in rarity choice (**Manga → SP → Alt Art → Base**), and updates the simulator. Use the set dropdown in **Review** to browse cards and override any automatic pick.
-4. The **Review** workspace includes the dedicated **DON card** section, where one artwork is chosen for every DON card in the simulator.
+## Install on your Mac
 
-When choosing cards one at a time, selecting an artwork automatically opens the next card that still needs a choice. **Cancel** stops this quick-pick flow at any point.
-5. Quit OPTCGSim before changing artwork. Selections made in **Review** install automatically.
+Requires macOS 13 (Ventura) or later, on either an Apple Silicon or Intel Mac.
 
-Use **Review** any time you want to switch an existing card to a different version. Use **Restore originals** to revert the most recent compatible install session.
+1. Go to the [latest release](../../releases/latest) and download `OPTCG Alt Art Switcher-<version>.zip`.
+2. Double-click the downloaded ZIP file, then drag **OPTCG Alt Art Switcher** into your **Applications** folder.
+3. Open the app from Applications. On the first run, select your **OP TCG Card Collection** folder and your **OPTCGSim.app** application.
+4. Click **Refresh & Apply**. The app finds your artwork, saves the automatic choice for each card, and updates the simulator.
 
-The app leaves the source collection untouched. Settings, backups, and session manifests live in `~/Library/Application Support/OPTCGAltArtSwitcher`.
+Use **Review** to choose a different version of any card, including DON cards. Use **Restore Originals** to undo the latest compatible installation session.
 
-## Development
+### Updating
+
+Updates are manual. Download the newest ZIP from the [Releases](../../releases) page, replace the copy in Applications, and open it normally. Your saved choices and backups remain in `~/Library/Application Support/OPTCGAltArtSwitcher`.
+
+### Troubleshooting
+
+- **macOS says the app cannot be opened:** Make sure you downloaded it from this project’s Releases page. If macOS still blocks it, open **System Settings → Privacy & Security**, then choose **Open Anyway** for the app.
+- **The simulator or collection cannot be found:** Click the matching location in the sidebar and select it again. Choose the `OPTCGSim.app` bundle itself, not its contents.
+- **Changes do not appear:** Quit OPTCGSim before clicking **Refresh & Apply**, then start the simulator again.
+- **Want to undo changes?** Open the app and choose **Restore Originals**.
+
+## Build from source (advanced)
+
+This option is only for people comfortable using Terminal and Xcode Command Line Tools.
 
 ```sh
+git clone https://github.com/YOUR-GITHUB-USERNAME/optcg-alt-art-switcher.git
+cd optcg-alt-art-switcher
 swift run AltArtCoreValidation
 scripts/build-app.sh
+open "dist/OPTCG Alt Art Switcher.app"
 ```
 
-For a read-only check against the current local collection and simulator:
+For a release-quality universal app, build on a Mac with full Xcode installed:
 
 ```sh
-swift run AltArtCoreValidation --scan-current
+ARCHS="arm64 x86_64" VERSION=1.0.0 scripts/build-app.sh
 ```
 
-The scanner accepts parenthesized image filenames such as `OP07-099(Custom).png`, `OP11-067(3rdAnn).png`, and `P-093(Custom).png`. It installs the matching existing simulator formats (`.png`/`.jpg` full art and `_small.jpg` thumbnails) at their original pixel dimensions.
+## For maintainers: publishing a release
+
+The GitHub Actions release workflow runs when a tag such as `v1.0.0` is pushed. It validates the core logic, builds a universal app, signs it, submits it to Apple for notarization, staples the result, verifies the archive, and publishes the ZIP plus a SHA-256 checksum.
+
+Before the first binary release, enroll in the Apple Developer Program and set these repository Actions secrets:
+
+- `MACOS_CERTIFICATE_BASE64` — base64-encoded Developer ID Application `.p12` certificate
+- `MACOS_CERTIFICATE_PASSWORD` — password used to export that certificate
+- `MACOS_KEYCHAIN_PASSWORD` — temporary CI keychain password
+- `MACOS_SIGNING_IDENTITY` — Developer ID Application certificate name
+- `APPLE_ID`, `APPLE_APP_PASSWORD`, and `APPLE_TEAM_ID` — Apple notarization credentials
+
+Do not create a release tag until those secrets are configured. The public source repository can be published before signing credentials are available.
+
+## License
+
+This project is licensed under the [GNU General Public License v3.0](LICENSE).

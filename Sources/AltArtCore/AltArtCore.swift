@@ -210,8 +210,92 @@ public struct ScanResult: Sendable {
     }
 }
 
+public struct IndexedArtwork: Codable, Hashable, Sendable {
+    public let relativePath: String
+    public let cardID: String?
+    public let isDon: Bool
+    public let fileSize: Int64
+    public let modificationDate: Date
+    public let sha256: String
+}
+
+public struct CollectionIndex: Codable, Sendable {
+    public static let currentVersion = 2
+    public let version: Int
+    public let sourceFolderPath: String
+    public let artworks: [IndexedArtwork]
+    public let simulatorAppPath: String
+    public let targetRelativePaths: [String: [String]]
+
+    public init(sourceFolderPath: String, artworks: [IndexedArtwork], simulatorAppPath: String, targetRelativePaths: [String: [String]]) {
+        self.version = Self.currentVersion
+        self.sourceFolderPath = sourceFolderPath
+        self.artworks = artworks
+        self.simulatorAppPath = simulatorAppPath
+        self.targetRelativePaths = targetRelativePaths
+    }
+}
+
+public final class CollectionIndexStore: @unchecked Sendable {
+    private let url: URL
+
+    public init(root: URL) { url = root.appendingPathComponent("collection-index.json") }
+
+    public func load(sourceFolderPath: String) -> CollectionIndex? {
+        guard let data = try? Data(contentsOf: url),
+              let index = try? JSONDecoder().decode(CollectionIndex.self, from: data),
+              index.version == CollectionIndex.currentVersion,
+              index.sourceFolderPath == sourceFolderPath else { return nil }
+        return index
+    }
+
+    public func save(_ index: CollectionIndex) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(index).write(to: url, options: .atomic)
+    }
+}
+
+public struct ScanMetrics: Sendable {
+    public let filesVisited: Int
+    public let filesHashed: Int
+    public let bytesHashed: Int64
+}
+
+public struct ScanOutcome: Sendable {
+    public let result: ScanResult
+    public let metrics: ScanMetrics
+}
+
 public enum AssetScanner {
     public static func scan(settings: UserSettings) throws -> ScanResult {
+        try scan(settings: settings, priorIndex: nil).result
+    }
+
+    public static func cached(settings: UserSettings, indexStore: CollectionIndexStore) throws -> ScanResult? {
+        guard let index = indexStore.load(sourceFolderPath: settings.sourceFolderPath),
+              index.simulatorAppPath == settings.simulatorAppPath else { return nil }
+        let cardsRoot = cardsRoot(for: URL(fileURLWithPath: settings.simulatorAppPath, isDirectory: true))
+        let targets = Dictionary(uniqueKeysWithValues: index.targetRelativePaths.compactMap { rawID, paths in
+            CardID(rawValue: rawID).map { ($0, paths.map { cardsRoot.appendingPathComponent($0) }) }
+        })
+        return try result(settings: settings, artworks: index.artworks, targetsByCard: targets)
+    }
+
+    public static func reconcile(settings: UserSettings, indexStore: CollectionIndexStore) throws -> ScanOutcome {
+        let prior = indexStore.load(sourceFolderPath: settings.sourceFolderPath)
+        let outcome = try scan(settings: settings, priorIndex: prior)
+        let cardsRoot = cardsRoot(for: URL(fileURLWithPath: settings.simulatorAppPath, isDirectory: true))
+        let canonicalRoot = cardsRoot.resolvingSymlinksInPath().path + "/"
+        let targetPaths = Dictionary(uniqueKeysWithValues: outcome.result.selections.map { selection in
+            (selection.id, selection.targetURLs.map { $0.resolvingSymlinksInPath().path.replacingOccurrences(of: canonicalRoot, with: "") })
+        })
+        try indexStore.save(CollectionIndex(sourceFolderPath: settings.sourceFolderPath, artworks: outcome.artworks, simulatorAppPath: settings.simulatorAppPath, targetRelativePaths: targetPaths))
+        return ScanOutcome(result: outcome.result, metrics: outcome.metrics)
+    }
+
+    private static func scan(settings: UserSettings, priorIndex: CollectionIndex?) throws -> (result: ScanResult, metrics: ScanMetrics, artworks: [IndexedArtwork]) {
         let sourceFolder = URL(fileURLWithPath: settings.sourceFolderPath, isDirectory: true)
         let canonicalSourcePath = sourceFolder.resolvingSymlinksInPath().path
         let simulatorApp = URL(fileURLWithPath: settings.simulatorAppPath, isDirectory: true)
@@ -219,38 +303,73 @@ public enum AssetScanner {
         guard FileManager.default.fileExists(atPath: sourceFolder.path) else { throw AltArtError.invalidSource(sourceFolder) }
         guard FileManager.default.fileExists(atPath: cardsRoot.path) else { throw AltArtError.invalidSimulator(simulatorApp) }
 
-        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey]
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
         guard let enumerator = FileManager.default.enumerator(at: sourceFolder, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles]) else {
-            return ScanResult(sourceFolder: sourceFolder, simulatorApp: simulatorApp, selections: [], donSelection: nil, ignoredFiles: [])
+            let empty = ScanResult(sourceFolder: sourceFolder, simulatorApp: simulatorApp, selections: [], donSelection: nil, ignoredFiles: [])
+            return (empty, ScanMetrics(filesVisited: 0, filesHashed: 0, bytesHashed: 0), [])
         }
 
-        var candidatesByCard: [CardID: [AltCandidate]] = [:]
-        var donCandidates: [DonCandidate] = []
+        let priorByPath = Dictionary((priorIndex?.artworks ?? []).map { ($0.relativePath, $0) }, uniquingKeysWith: { _, newest in newest })
+        var artworks: [IndexedArtwork] = []
         var ignored: [URL] = []
+        var filesVisited = 0
+        var filesHashed = 0
+        var bytesHashed: Int64 = 0
         for case let url as URL in enumerator {
             guard let values = try? url.resourceValues(forKeys: keys), values.isRegularFile == true else { continue }
+            filesVisited += 1
             let name = url.lastPathComponent
             guard !url.deletingPathExtension().lastPathComponent.lowercased().hasSuffix("_small") else { continue }
             let relative = url.resolvingSymlinksInPath().path.replacingOccurrences(of: canonicalSourcePath + "/", with: "")
-            if isDonArtwork(relativePath: relative, filename: name) {
-                donCandidates.append(DonCandidate(url: url, relativePath: relative, sha256: try sha256(of: url)))
-                continue
-            }
-            guard let cardID = CardID(name) else {
+            let isDon = isDonArtwork(relativePath: relative, filename: name)
+            let cardID = CardID(name)
+            guard isDon || cardID != nil else {
                 if ["png", "jpg", "jpeg"].contains(url.pathExtension.lowercased()) && name.contains("(") { ignored.append(url) }
                 continue
             }
-            let candidate = AltCandidate(cardID: cardID, url: url, relativePath: relative, sha256: try sha256(of: url))
-            candidatesByCard[cardID, default: []].append(candidate)
+            let fileSize = Int64(values.fileSize ?? 0)
+            let modificationDate = values.contentModificationDate ?? .distantPast
+            let hash: String
+            if let prior = priorByPath[relative], prior.fileSize == fileSize, prior.modificationDate == modificationDate {
+                hash = prior.sha256
+            } else {
+                hash = try sha256(of: url)
+                filesHashed += 1
+                bytesHashed += fileSize
+            }
+            artworks.append(IndexedArtwork(relativePath: relative, cardID: cardID?.rawValue, isDon: isDon, fileSize: fileSize, modificationDate: modificationDate, sha256: hash))
         }
 
-        let selections = try candidatesByCard.keys.sorted().map { cardID -> CardSelection in
+        let result = try result(settings: settings, artworks: artworks, ignoredFiles: ignored)
+        return (result, ScanMetrics(filesVisited: filesVisited, filesHashed: filesHashed, bytesHashed: bytesHashed), artworks)
+    }
+
+    private static func result(settings: UserSettings, artworks: [IndexedArtwork], ignoredFiles: [URL] = [], targetsByCard suppliedTargets: [CardID: [URL]]? = nil) throws -> ScanResult {
+        let sourceFolder = URL(fileURLWithPath: settings.sourceFolderPath, isDirectory: true)
+        let simulatorApp = URL(fileURLWithPath: settings.simulatorAppPath, isDirectory: true)
+        let cardsRoot = cardsRoot(for: simulatorApp)
+        guard FileManager.default.fileExists(atPath: sourceFolder.path) else { throw AltArtError.invalidSource(sourceFolder) }
+        guard FileManager.default.fileExists(atPath: cardsRoot.path) else { throw AltArtError.invalidSimulator(simulatorApp) }
+        var candidatesByCard: [CardID: [AltCandidate]] = [:]
+        var donCandidates: [DonCandidate] = []
+        for artwork in artworks {
+            let url = sourceFolder.appendingPathComponent(artwork.relativePath)
+            if artwork.isDon {
+                donCandidates.append(DonCandidate(url: url, relativePath: artwork.relativePath, sha256: artwork.sha256))
+            } else if let raw = artwork.cardID, let cardID = CardID(rawValue: raw) {
+                candidatesByCard[cardID, default: []].append(AltCandidate(cardID: cardID, url: url, relativePath: artwork.relativePath, sha256: artwork.sha256))
+            }
+        }
+
+        let targetsByCard = suppliedTargets ?? simulatorTargets(cardsRoot: cardsRoot)
+
+        let selections = candidatesByCard.keys.sorted().map { cardID -> CardSelection in
             let candidates = candidatesByCard[cardID, default: []].sorted {
                 $0.rarity == $1.rarity
                     ? $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending
                     : $0.rarity < $1.rarity
             }
-            let targets = try targetURLs(for: cardID, cardsRoot: cardsRoot)
+            let targets = targetsByCard[cardID, default: []]
             let saved = settings.choices[cardID.rawValue]
             if let saved {
                 if let candidate = candidates.first(where: { $0.relativePath == saved.relativeSourcePath }) {
@@ -280,18 +399,22 @@ public enum AssetScanner {
         } else {
             donSelection = nil
         }
-        return ScanResult(sourceFolder: sourceFolder, simulatorApp: simulatorApp, selections: selections, donSelection: donSelection, ignoredFiles: ignored)
+        return ScanResult(sourceFolder: sourceFolder, simulatorApp: simulatorApp, selections: selections, donSelection: donSelection, ignoredFiles: ignoredFiles)
     }
 
     public static func cardsRoot(for simulatorApp: URL) -> URL {
         simulatorApp.appendingPathComponent("Contents/Resources/Data/StreamingAssets/Cards", isDirectory: true)
     }
 
-    private static func targetURLs(for cardID: CardID, cardsRoot: URL) throws -> [URL] {
-        let setFolder = cardsRoot.appendingPathComponent(cardID.setCode, isDirectory: true)
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: setFolder.path) else { return [] }
-        let accepted = ["\(cardID.rawValue).png", "\(cardID.rawValue).jpg", "\(cardID.rawValue).jpeg", "\(cardID.rawValue)_small.jpg", "\(cardID.rawValue)_small.jpeg"].map { $0.lowercased() }
-        return names.filter { accepted.contains($0.lowercased()) }.map { setFolder.appendingPathComponent($0) }
+    private static func simulatorTargets(cardsRoot: URL) -> [CardID: [URL]] {
+        guard let enumerator = FileManager.default.enumerator(at: cardsRoot, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else { return [:] }
+        var targets: [CardID: [URL]] = [:]
+        for case let url as URL in enumerator {
+            let stem = url.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "_small", with: "")
+            guard ["png", "jpg", "jpeg"].contains(url.pathExtension.lowercased()), let cardID = CardID(rawValue: stem) else { continue }
+            targets[cardID, default: []].append(url)
+        }
+        return targets
     }
 
     private static func isDonArtwork(relativePath: String, filename: String) -> Bool {
@@ -335,6 +458,7 @@ public struct ReplacementRecord: Codable, Sendable {
     public let backupRelativePath: String
     public let originalSHA256: String
     public let outputSHA256: String
+    public let sourceSHA256: String?
 }
 
 public struct ApplyManifest: Codable, Sendable {
@@ -348,7 +472,20 @@ public struct ApplyReport: Sendable {
     public let cardsApplied: Int
     public let donApplied: Bool
     public let filesApplied: Int
-    public let backupManifest: URL
+    public let backupManifest: URL?
+    public let appliedCardIDs: Set<String>
+}
+
+public struct ApplyRequest: Sendable {
+    public let cardIDs: Set<String>?
+    public let includeDon: Bool
+    public let onlyChanged: Bool
+
+    public init(cardIDs: Set<String>? = nil, includeDon: Bool = true, onlyChanged: Bool = false) {
+        self.cardIDs = cardIDs
+        self.includeDon = includeDon
+        self.onlyChanged = onlyChanged
+    }
 }
 
 public final class AssetInstaller: @unchecked Sendable {
@@ -357,10 +494,12 @@ public final class AssetInstaller: @unchecked Sendable {
 
     public init(store: SettingsStore) { self.store = store }
 
-    public func apply(scan: ScanResult) throws -> ApplyReport {
-        guard scan.unresolved.isEmpty else { throw AltArtError.unresolvedChoices(scan.unresolved.count) }
+    public func apply(scan: ScanResult, request: ApplyRequest = ApplyRequest()) throws -> ApplyReport {
+        let blockingUnresolved = scan.unresolved.filter { request.cardIDs?.contains($0.id) ?? true }
+        guard blockingUnresolved.isEmpty else { throw AltArtError.unresolvedChoices(blockingUnresolved.count) }
         guard !isSimulatorRunning(appURL: scan.simulatorApp) else { throw AltArtError.simulatorIsRunning }
         let cardsRoot = AssetScanner.cardsRoot(for: scan.simulatorApp)
+        let canonicalCardsRoot = cardsRoot.resolvingSymlinksInPath().path
         let manifestsDirectory = store.root.appendingPathComponent("manifests", isDirectory: true)
         let filesDirectory = store.root.appendingPathComponent("backups/files", isDirectory: true)
         try fm.createDirectory(at: manifestsDirectory, withIntermediateDirectories: true)
@@ -368,12 +507,20 @@ public final class AssetInstaller: @unchecked Sendable {
 
         var records: [ReplacementRecord] = []
         var filesApplied = 0
+        var appliedCardIDs: Set<String> = []
+        var donApplied = false
+        let knownManifests = try manifests(for: scan.simulatorApp.path)
+        let priorRecords = request.onlyChanged ? latestRecordsByTarget(in: knownManifests) : [:]
         for selection in scan.selected {
             guard let candidate = selection.selected else { continue }
+            guard request.cardIDs?.contains(selection.id) ?? true else { continue }
             for target in selection.targetURLs {
-                let targetRelative = target.path.replacingOccurrences(of: cardsRoot.path + "/", with: "")
+                let targetRelative = target.resolvingSymlinksInPath().path.replacingOccurrences(of: canonicalCardsRoot + "/", with: "")
                 let currentHash = try sha256(of: target)
-                let backupRelative = try backupPath(for: targetRelative, currentHash: currentHash, simulatorPath: scan.simulatorApp.path, filesDirectory: filesDirectory)
+                if let prior = priorRecords[targetRelative], prior.sourceSHA256 == candidate.sha256, prior.outputSHA256 == currentHash {
+                    continue
+                }
+                let backupRelative = backupPath(for: targetRelative, currentHash: currentHash, filesDirectory: filesDirectory, knownManifests: knownManifests)
                 let backupURL = store.root.appendingPathComponent(backupRelative)
                 if !fm.fileExists(atPath: backupURL.path) {
                     try fm.createDirectory(at: backupURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -381,15 +528,19 @@ public final class AssetInstaller: @unchecked Sendable {
                 }
                 try ImageTranscoder.render(source: candidate.url, template: target)
                 let outputHash = try sha256(of: target)
-                records.append(ReplacementRecord(targetRelativePath: targetRelative, backupRelativePath: backupRelative, originalSHA256: currentHash, outputSHA256: outputHash))
+                records.append(ReplacementRecord(targetRelativePath: targetRelative, backupRelativePath: backupRelative, originalSHA256: currentHash, outputSHA256: outputHash, sourceSHA256: candidate.sha256))
                 filesApplied += 1
+                appliedCardIDs.insert(selection.id)
             }
         }
-        if let donSelection = scan.donSelection {
+        if request.includeDon, let donSelection = scan.donSelection {
             for target in donSelection.targetURLs {
-                let targetRelative = target.path.replacingOccurrences(of: cardsRoot.path + "/", with: "")
+                let targetRelative = target.resolvingSymlinksInPath().path.replacingOccurrences(of: canonicalCardsRoot + "/", with: "")
                 let currentHash = try sha256(of: target)
-                let backupRelative = try backupPath(for: targetRelative, currentHash: currentHash, simulatorPath: scan.simulatorApp.path, filesDirectory: filesDirectory)
+                if let prior = priorRecords[targetRelative], prior.sourceSHA256 == donSelection.selected.sha256, prior.outputSHA256 == currentHash {
+                    continue
+                }
+                let backupRelative = backupPath(for: targetRelative, currentHash: currentHash, filesDirectory: filesDirectory, knownManifests: knownManifests)
                 let backupURL = store.root.appendingPathComponent(backupRelative)
                 if !fm.fileExists(atPath: backupURL.path) {
                     try fm.createDirectory(at: backupURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -397,44 +548,48 @@ public final class AssetInstaller: @unchecked Sendable {
                 }
                 try ImageTranscoder.render(source: donSelection.selected.url, template: target)
                 let outputHash = try sha256(of: target)
-                records.append(ReplacementRecord(targetRelativePath: targetRelative, backupRelativePath: backupRelative, originalSHA256: currentHash, outputSHA256: outputHash))
+                records.append(ReplacementRecord(targetRelativePath: targetRelative, backupRelativePath: backupRelative, originalSHA256: currentHash, outputSHA256: outputHash, sourceSHA256: donSelection.selected.sha256))
                 filesApplied += 1
+                donApplied = true
             }
         }
-        let manifest = ApplyManifest(id: UUID(), createdAt: Date(), simulatorAppPath: scan.simulatorApp.path, records: records)
-        let manifestURL = manifestsDirectory.appendingPathComponent("\(manifest.id.uuidString).json")
-        let data = try JSONEncoder.pretty.encode(manifest)
-        try data.write(to: manifestURL, options: .atomic)
-        return ApplyReport(cardsApplied: scan.selected.count, donApplied: scan.donSelection != nil, filesApplied: filesApplied, backupManifest: manifestURL)
+        var manifestURL: URL?
+        if !records.isEmpty {
+            let manifest = ApplyManifest(id: UUID(), createdAt: Date(), simulatorAppPath: scan.simulatorApp.path, records: records)
+            let url = manifestsDirectory.appendingPathComponent("\(manifest.id.uuidString).json")
+            try JSONEncoder.pretty.encode(manifest).write(to: url, options: .atomic)
+            manifestURL = url
+        }
+        return ApplyReport(cardsApplied: appliedCardIDs.count, donApplied: donApplied, filesApplied: filesApplied, backupManifest: manifestURL, appliedCardIDs: appliedCardIDs)
     }
 
     public func restore(simulatorApp: URL) throws -> Int {
         guard !isSimulatorRunning(appURL: simulatorApp) else { throw AltArtError.simulatorIsRunning }
-        guard let manifest = try latestManifest(for: simulatorApp.path) else { throw AltArtError.noRestoreAvailable }
+        let currentRecords = latestRecordsByTarget(in: try manifests(for: simulatorApp.path))
+        guard !currentRecords.isEmpty else { throw AltArtError.noRestoreAvailable }
         let cardsRoot = AssetScanner.cardsRoot(for: simulatorApp)
-        for record in manifest.records {
+        for record in currentRecords.values {
             let target = cardsRoot.appendingPathComponent(record.targetRelativePath)
             guard fm.fileExists(atPath: target.path), try sha256(of: target) == record.outputSHA256 else { throw AltArtError.changedInstallation }
         }
-        for record in manifest.records {
+        for record in currentRecords.values {
             let target = cardsRoot.appendingPathComponent(record.targetRelativePath)
             let backup = store.root.appendingPathComponent(record.backupRelativePath)
             guard fm.fileExists(atPath: backup.path) else { throw AltArtError.noRestoreAvailable }
             try atomicReplace(target: target, with: backup)
         }
-        return manifest.records.count
+        return currentRecords.count
     }
 
-    private func backupPath(for targetRelative: String, currentHash: String, simulatorPath: String, filesDirectory: URL) throws -> String {
-        if let existing = try originalBackupForKnownOutput(targetRelative: targetRelative, currentHash: currentHash, simulatorPath: simulatorPath) {
+    private func backupPath(for targetRelative: String, currentHash: String, filesDirectory: URL, knownManifests: [ApplyManifest]) -> String {
+        if let existing = originalBackupForKnownOutput(targetRelative: targetRelative, currentHash: currentHash, manifests: knownManifests) {
             return existing
         }
         let safeTarget = targetRelative.replacingOccurrences(of: "/", with: "__")
         return "backups/files/\(currentHash)-\(safeTarget)"
     }
 
-    private func originalBackupForKnownOutput(targetRelative: String, currentHash: String, simulatorPath: String) throws -> String? {
-        guard let manifests = try? manifests(for: simulatorPath) else { return nil }
+    private func originalBackupForKnownOutput(targetRelative: String, currentHash: String, manifests: [ApplyManifest]) -> String? {
         for manifest in manifests.sorted(by: { $0.createdAt > $1.createdAt }) {
             if let record = manifest.records.first(where: { $0.targetRelativePath == targetRelative && $0.outputSHA256 == currentHash }) {
                 return record.backupRelativePath
@@ -445,6 +600,14 @@ public final class AssetInstaller: @unchecked Sendable {
 
     private func latestManifest(for simulatorPath: String) throws -> ApplyManifest? {
         try manifests(for: simulatorPath).max(by: { $0.createdAt < $1.createdAt })
+    }
+
+    private func latestRecordsByTarget(in manifests: [ApplyManifest]) -> [String: ReplacementRecord] {
+        var result: [String: ReplacementRecord] = [:]
+        for manifest in manifests.sorted(by: { $0.createdAt < $1.createdAt }) {
+            for record in manifest.records { result[record.targetRelativePath] = record }
+        }
+        return result
     }
 
     private func manifests(for simulatorPath: String) throws -> [ApplyManifest] {
@@ -485,8 +648,15 @@ public enum ImageTranscoder {
 }
 
 public func sha256(of url: URL) throws -> String {
-    let data = try Data(contentsOf: url)
-    return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    let handle = try FileHandle(forReadingFrom: url)
+    defer { try? handle.close() }
+    var hasher = SHA256()
+    while true {
+        let data = try handle.read(upToCount: 1024 * 1024) ?? Data()
+        guard !data.isEmpty else { break }
+        hasher.update(data: data)
+    }
+    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
 }
 
 public func atomicReplace(target: URL, with replacement: URL) throws {

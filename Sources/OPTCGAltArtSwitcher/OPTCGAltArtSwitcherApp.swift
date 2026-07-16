@@ -30,8 +30,10 @@ final class AppModel: ObservableObject {
     @Published var batchSelectedIDs: Set<String> = []
     @Published var batchChoiceRule: BulkChoiceRule = .highestRarity
     @Published private(set) var quickPickActive = false
+    @Published private(set) var artworkRevision = 0
 
     let store = SettingsStore()
+    private lazy var indexStore = CollectionIndexStore(root: store.root)
 
     init() {
         settings = store.load()
@@ -47,7 +49,7 @@ final class AppModel: ObservableObject {
     /// what still needs to be chosen instead of presenting an error on launch.
     func loadSavedCollectionIfAvailable() {
         guard !isWorking, savedLocationsAreAvailable else { return }
-        scanAssets()
+        scanAssets(useCachedResult: true)
     }
 
     func chooseSourceFolder() {
@@ -72,15 +74,21 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func scanAssets(force: Bool = false, installAfterScan: Bool = false) {
+    func scanAssets(force: Bool = false, installAfterScan: Bool = false, useCachedResult: Bool = false) {
         guard force || !isWorking else { return }
         persistSettings()
+        if useCachedResult, let cached = try? AssetScanner.cached(settings: settings, indexStore: indexStore) {
+            scan = cached
+            batchSelectedIDs = Set(cached.unresolved.map { $0.id })
+        }
         isWorking = true; activityLabel = "Scanning card artwork…"; error = nil; message = nil
         let settings = self.settings
+        let indexStore = self.indexStore
         Task {
             var shouldInstall = false
             do {
-                let result = try await Task.detached { try AssetScanner.scan(settings: settings) }.value
+                let outcome = try await Task.detached { try AssetScanner.reconcile(settings: settings, indexStore: indexStore) }.value
+                let result = outcome.result
                 var changedPreferences = false
                 for selection in result.selections {
                     guard let candidate = selection.selected else { continue }
@@ -99,6 +107,7 @@ final class AppModel: ObservableObject {
                 }
                 if changedPreferences { self.persistSettings() }
                 scan = result
+                artworkRevision &+= 1
                 batchSelectedIDs = Set(result.unresolved.map { $0.id })
                 message = nil
                 // An explicit refresh is also the user's request to bring the
@@ -109,7 +118,7 @@ final class AppModel: ObservableObject {
             } catch { self.error = error.localizedDescription }
             self.isWorking = false
             self.activityLabel = ""
-            if shouldInstall { installChanges() }
+            if shouldInstall { installChanges(onlyChanged: true) }
         }
     }
 
@@ -135,7 +144,7 @@ final class AppModel: ObservableObject {
             choiceEditor = nil
         }
         batchSelectedIDs.remove(selection.id)
-        installChanges()
+        installChanges(cardIDs: [selection.id], includeDon: false)
     }
 
     func beginQuickPick(at selection: CardSelection) {
@@ -165,7 +174,7 @@ final class AppModel: ObservableObject {
             scan = result
         }
         donEditor = nil
-        installChanges()
+        installChanges(cardIDs: [], includeDon: true)
     }
 
     func cancelDonEditor() { donEditor = nil }
@@ -189,6 +198,7 @@ final class AppModel: ObservableObject {
     func resolveBatch() {
         guard var result = scan else { return }
         var resolved = 0
+        var resolvedIDs: Set<String> = []
         for index in result.selections.indices {
             let selection = result.selections[index]
             guard selection.selected == nil,
@@ -198,25 +208,30 @@ final class AppModel: ObservableObject {
             result.selections[index].origin = .manual
             settings.choices[selection.cardID.rawValue] = SavedChoice(cardID: selection.cardID.rawValue, relativeSourcePath: candidate.relativePath, sourceSHA256: candidate.sha256)
             resolved += 1
+            resolvedIDs.insert(selection.id)
         }
         guard resolved > 0 else { return }
         persistSettings()
         scan = result
         batchSelectedIDs = Set(result.unresolved.map { $0.id })
         message = "Saved artwork choices for \(resolved) cards. Installing your choices…"
-        installChanges()
+        installChanges(cardIDs: resolvedIDs, includeDon: false)
     }
 
-    private func installChanges() {
-        guard let scan, scan.unresolved.isEmpty, !isWorking else { return }
+    private func installChanges(cardIDs: Set<String>? = nil, includeDon: Bool = true, onlyChanged: Bool = false) {
+        guard let scan, !isWorking else { return }
+        let blockingUnresolved = scan.unresolved.filter { cardIDs?.contains($0.id) ?? true }
+        guard blockingUnresolved.isEmpty else { return }
         isWorking = true; activityLabel = "Installing selected artwork…"; error = nil; message = nil
         let store = self.store
+        let request = ApplyRequest(cardIDs: cardIDs, includeDon: includeDon, onlyChanged: onlyChanged)
         Task {
             do {
-                let report = try await Task.detached { try AssetInstaller(store: store).apply(scan: scan) }.value
+                let report = try await Task.detached { try AssetInstaller(store: store).apply(scan: scan, request: request) }.value
                 let donDescription = report.donApplied ? " plus your DON card" : ""
                 message = "Installed \(report.cardsApplied) card choices\(donDescription) across \(report.filesApplied) simulator files. Originals are backed up."
-                scanAssets(force: true)
+                isWorking = false
+                activityLabel = ""
             } catch { self.error = error.localizedDescription; self.isWorking = false; self.activityLabel = "" }
         }
     }
@@ -526,8 +541,11 @@ struct ScanSummary: View {
         let selections: [CardSelection]
     }
 
-    private var previewSets: [PreviewSet] {
-        Dictionary(grouping: scan.selected, by: { $0.cardID.setCode })
+    private let previewSets: [PreviewSet]
+
+    init(scan: ScanResult) {
+        self.scan = scan
+        self.previewSets = Dictionary(grouping: scan.selected, by: { $0.cardID.setCode })
             .map { PreviewSet(id: $0.key, selections: $0.value.sorted { $0.cardID < $1.cardID }) }
             .sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
     }
@@ -820,16 +838,7 @@ struct ArtworkImage: View {
 
     var body: some View {
         GeometryReader { proxy in
-            Group {
-                if let url, let image = ArtworkImageCache.shared.image(at: url) {
-                    Image(nsImage: image).resizable().scaledToFill()
-                } else {
-                    Image(systemName: "photo")
-                        .font(.title2).foregroundStyle(HybridTheme.secondaryText)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(HybridTheme.raised)
-                }
-            }
+            AsyncArtworkImage(url: url, size: proxy.size)
             .frame(width: proxy.size.width, height: proxy.size.height)
             .clipped()
         }
@@ -843,21 +852,116 @@ struct ArtworkImage: View {
 private final class ArtworkImageCache {
     static let shared = ArtworkImageCache()
 
-    private let cache = NSCache<NSURL, NSImage>()
+    private let cache = NSCache<NSString, NSImage>()
+    private struct Flight {
+        let task: Task<ThumbnailBox?, Never>
+        var waiters: Set<UUID>
+    }
+    private var inFlight: [String: Flight] = [:]
 
     private init() {
-        cache.countLimit = 400
+        cache.totalCostLimit = 128 * 1024 * 1024
     }
 
-    func image(at url: URL) -> NSImage? {
-        let key = url as NSURL
+    func image(at url: URL, maxPixelSize: Int, fingerprint: TimeInterval) async -> NSImage? {
+        let keyString = "\(url.standardizedFileURL.path)|\(fingerprint)|\(maxPixelSize)"
+        let key = keyString as NSString
         if let image = cache.object(forKey: key) { return image }
-        guard let image = NSImage(contentsOf: url) else { return nil }
-        cache.setObject(image, forKey: key)
-        return image
+        let waiter = UUID()
+        let task: Task<ThumbnailBox?, Never>
+        if var flight = inFlight[keyString] {
+            flight.waiters.insert(waiter)
+            inFlight[keyString] = flight
+            task = flight.task
+        } else {
+            task = Task.detached(priority: .userInitiated) { ThumbnailBox.downsample(url: url, maxPixelSize: maxPixelSize) }
+            inFlight[keyString] = Flight(task: task, waiters: [waiter])
+        }
+        return await withTaskCancellationHandler {
+            let box = await task.value
+            finish(keyString: keyString, cacheKey: key, waiter: waiter, box: box)
+            return box?.image
+        } onCancel: {
+            Task { @MainActor in self.cancel(keyString: keyString, waiter: waiter) }
+        }
+    }
+
+    private func finish(keyString: String, cacheKey: NSString, waiter: UUID, box: ThumbnailBox?) {
+        guard var flight = inFlight[keyString] else { return }
+        flight.waiters.remove(waiter)
+        if let box { cache.setObject(box.image, forKey: cacheKey, cost: box.pixelCost) }
+        if flight.waiters.isEmpty { inFlight[keyString] = nil } else { inFlight[keyString] = flight }
+    }
+
+    private func cancel(keyString: String, waiter: UUID) {
+        guard var flight = inFlight[keyString] else { return }
+        flight.waiters.remove(waiter)
+        if flight.waiters.isEmpty {
+            flight.task.cancel()
+            inFlight[keyString] = nil
+        } else {
+            inFlight[keyString] = flight
+        }
     }
 
     func removeAll() { cache.removeAllObjects() }
+}
+
+private final class ThumbnailBox: @unchecked Sendable {
+    let image: NSImage
+    let pixelCost: Int
+
+    init(image: NSImage, pixelCost: Int) { self.image = image; self.pixelCost = pixelCost }
+
+    static func downsample(url: URL, maxPixelSize: Int) -> ThumbnailBox? {
+        guard !Task.isCancelled else { return nil }
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, options) else { return nil }
+        let thumbnailOptions = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixelSize)
+        ] as CFDictionary
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else { return nil }
+        guard !Task.isCancelled else { return nil }
+        return ThumbnailBox(
+            image: NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height)),
+            pixelCost: cgImage.bytesPerRow * cgImage.height
+        )
+    }
+}
+
+private struct AsyncArtworkImage: View {
+    @EnvironmentObject private var model: AppModel
+    let url: URL?
+    let size: CGSize
+    @State private var image: NSImage?
+
+    private var pixelSize: Int { Int(max(size.width, size.height) * (NSScreen.main?.backingScaleFactor ?? 2)) }
+    private var requestID: String { "\(url?.path ?? "")|\(pixelSize)|\(model.artworkRevision)" }
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image).resizable().scaledToFill()
+            } else {
+                Image(systemName: "photo")
+                    .font(.title2).foregroundStyle(HybridTheme.secondaryText)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(HybridTheme.raised)
+            }
+        }
+        .task(id: requestID) {
+            image = nil
+            guard let url else { return }
+            let fingerprint = await Task.detached(priority: .userInitiated) {
+                (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate?.timeIntervalSince1970) ?? 0
+            }.value
+            guard !Task.isCancelled else { return }
+            image = await ArtworkImageCache.shared.image(at: url, maxPixelSize: pixelSize, fingerprint: fingerprint)
+        }
+    }
 }
 
 struct SelectedArtworkThumbnail: View {
@@ -872,19 +976,7 @@ struct ArtworkThumbnail: View {
     let url: URL?
 
     var body: some View {
-        Group {
-            if let url, let image = ArtworkImageCache.shared.image(at: url) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Image(systemName: "photo")
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color.secondary.opacity(0.10))
-            }
-        }
+        ArtworkImage(url: url)
         .frame(width: 44, height: 62)
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(.secondary.opacity(0.25)))

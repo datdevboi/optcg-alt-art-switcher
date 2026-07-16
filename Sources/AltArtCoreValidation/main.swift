@@ -10,9 +10,15 @@ struct AltArtCoreValidation {
             try reportSavedSettingsScan()
             return
         }
+        if CommandLine.arguments.contains("--benchmark-current") {
+            try benchmarkSavedSettingsScan()
+            return
+        }
         try validateCardIDParsing()
         try validateBulkRules()
         try validateSettingsStorePersistsLocationsAndSelections()
+        try validateIncrementalCollectionIndex()
+        try validateScopedApply()
         try validateLiveChoiceEditorBinding()
         try validateSavedChoiceStability()
         try validateNestedFolderScansBareCardFilenames()
@@ -23,6 +29,74 @@ struct AltArtCoreValidation {
         try validateApplyAndRestore()
         print("All AltArtCore validations passed.")
     }
+}
+
+private func benchmarkSavedSettingsScan() throws {
+    let root = try makeTemporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let settings = SettingsStore().load()
+    let store = CollectionIndexStore(root: root)
+    let clock = ContinuousClock()
+    let coldStart = clock.now
+    let cold = try AssetScanner.reconcile(settings: settings, indexStore: store)
+    let coldElapsed = coldStart.duration(to: clock.now)
+    let cachedStart = clock.now
+    let cached = try AssetScanner.cached(settings: settings, indexStore: store)
+    let cachedElapsed = cachedStart.duration(to: clock.now)
+    let warmStart = clock.now
+    let warm = try AssetScanner.reconcile(settings: settings, indexStore: store)
+    let warmElapsed = warmStart.duration(to: clock.now)
+    print("Cold: \(cold.result.selections.count) cards, \(cold.metrics.filesHashed) files hashed in \(coldElapsed)")
+    print("Cached presentation: \(cached?.selections.count ?? 0) cards in \(cachedElapsed)")
+    print("Warm: \(warm.result.selections.count) cards, \(warm.metrics.filesHashed) files hashed in \(warmElapsed)")
+}
+
+private func validateScopedApply() throws {
+    let root = try makeTemporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let source = root.appendingPathComponent("collection", isDirectory: true)
+    let app = root.appendingPathComponent("OPTCGSim.app", isDirectory: true)
+    try makeImage(at: source.appendingPathComponent("OP07-099(Alt).png"), width: 80, height: 120, type: .png, color: red)
+    try makeImage(at: source.appendingPathComponent("OP07-100(Alt).png"), width: 80, height: 120, type: .png, color: green)
+    try makeTargetTree(app: app, id: "OP07-099")
+    try makeTargetTree(app: app, id: "OP07-100")
+    let scan = try AssetScanner.scan(settings: UserSettings(sourceFolderPath: source.path, simulatorAppPath: app.path))
+    let report = try AssetInstaller(store: SettingsStore(root: root.appendingPathComponent("state"))).apply(
+        scan: scan,
+        request: ApplyRequest(cardIDs: ["OP07-099"], includeDon: false)
+    )
+    try expect(report.appliedCardIDs == ["OP07-099"], "A scoped apply must report only the requested card")
+    try expect(report.filesApplied == 2, "A scoped apply must touch only the requested card's targets")
+    let store = SettingsStore(root: root.appendingPathComponent("state"))
+    let second = try AssetInstaller(store: store).apply(scan: scan, request: ApplyRequest(cardIDs: ["OP07-100"], includeDon: false))
+    try expect(second.appliedCardIDs == ["OP07-100"], "A second scoped apply must remain isolated")
+    try expect(AssetInstaller(store: store).restore(simulatorApp: app) == 4, "Restore must cover targets from every scoped apply")
+}
+
+private func validateIncrementalCollectionIndex() throws {
+    let root = try makeTemporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let source = root.appendingPathComponent("collection", isDirectory: true)
+    let app = root.appendingPathComponent("OPTCGSim.app", isDirectory: true)
+    try makeImage(at: source.appendingPathComponent("OP07-099(Alt).png"), width: 80, height: 120, type: .png, color: red)
+    try makeTargetTree(app: app, id: "OP07-099")
+    let indexStore = CollectionIndexStore(root: root.appendingPathComponent("state", isDirectory: true))
+    let settings = UserSettings(sourceFolderPath: source.path, simulatorAppPath: app.path)
+
+    let cold = try AssetScanner.reconcile(settings: settings, indexStore: indexStore)
+    try expect(cold.metrics.filesHashed == 1 && cold.metrics.bytesHashed > 0, "A cold scan must hash discovered artwork")
+    let warm = try AssetScanner.reconcile(settings: settings, indexStore: indexStore)
+    try expect(warm.metrics.filesHashed == 0 && warm.metrics.bytesHashed == 0, "An unchanged warm scan must reuse indexed hashes")
+    try expect(warm.result.selections.count == 1, "A warm scan must reconstruct the same library")
+    try expect(try AssetScanner.cached(settings: settings, indexStore: indexStore)?.selections.count == 1, "Cached startup must reconstruct the library without reconciliation")
+
+    let artwork = source.appendingPathComponent("OP07-099(Alt).png")
+    try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(2)], ofItemAtPath: artwork.path)
+    let changed = try AssetScanner.reconcile(settings: settings, indexStore: indexStore)
+    try expect(changed.metrics.filesHashed == 1, "A metadata-changed artwork must be rehashed")
+    try FileManager.default.removeItem(at: artwork)
+    let deleted = try AssetScanner.reconcile(settings: settings, indexStore: indexStore)
+    try expect(deleted.result.selections.isEmpty, "Deleted artwork must be removed from the index")
 }
 
 private func reportSavedSettingsScan() throws {
@@ -131,8 +205,12 @@ private func validateLiveChoiceEditorBinding() throws {
     try expect(source.contains("SetShelf(setCode:"), "Review preview must render each grouped card set")
     try expect(source.contains("@State private var selectedCardID"), "Review must retain card selection state")
     try expect(source.contains("ArtworkImageCache"), "Artwork must be cached for responsive browsing")
+    try expect(!source.contains("NSImage(contentsOf:"), "Artwork previews must not decode full images synchronously")
+    try expect(source.contains("CGImageSourceCreateThumbnailAtIndex"), "Artwork previews must use downsampled thumbnails")
+    try expect(source.contains("cache.totalCostLimit"), "Thumbnail memory must be limited by decoded byte cost")
+    try expect(source.contains("Task.detached(priority: .userInitiated)"), "Thumbnail disk work must run outside the main actor")
     try expect(source.contains("TextField(\"Find card ID\""), "Review must provide card-ID search")
-    try expect(source.contains("installChanges()"), "Manual artwork selections must install immediately")
+    try expect(source.contains("installChanges(cardIDs:"), "Manual artwork selections must install immediately with a scoped request")
     try expect(source.contains("func loadSavedCollectionIfAvailable()"), "The app must load a saved collection automatically")
     try expect(source.contains(".task { model.loadSavedCollectionIfAvailable() }"), "The saved collection must load when the app opens")
     try expect(source.contains("self.loadSavedCollectionIfAvailable()"), "Changing a location must refresh the collection automatically")

@@ -10,8 +10,9 @@ Requires macOS 13 (Ventura) or later, on either an Apple Silicon or Intel Mac.
 
 1. Go to the [latest release](../../releases/latest) and download `OPTCG Alt Art Switcher-<version>.zip`.
 2. Double-click the downloaded ZIP file, then drag **OPTCG Alt Art Switcher** into your **Applications** folder.
-3. Open the app from Applications. On the first run, select your **OP TCG Card Collection** folder and your **OPTCGSim.app** application.
-4. Click **Refresh & Apply**. The app finds your artwork, saves the automatic choice for each card, and updates the simulator.
+3. Open the app from Applications. Because the app is unsigned, macOS will block the first launch: go to **System Settings → Privacy & Security** and choose **Open Anyway**, then confirm **Open**. This is needed only once.
+4. Select your **OP TCG Card Collection** folder and your **OPTCGSim.app** application.
+5. Click **Refresh & Apply**. The app finds your artwork, saves the automatic choice for each card, and updates the simulator.
 
 Use **Review** to choose a different version of any card, including DON cards. Use **Restore Originals** to undo the latest compatible installation session.
 
@@ -21,7 +22,7 @@ Updates are manual. Download the newest ZIP from the [Releases](../../releases) 
 
 ### Troubleshooting
 
-- **macOS says the app cannot be opened:** Make sure you downloaded it from this project’s Releases page. If macOS still blocks it, open **System Settings → Privacy & Security**, then choose **Open Anyway** for the app.
+- **macOS says the app cannot be opened:** This is expected on the first launch because the app is unsigned. Make sure you downloaded it from this project’s Releases page, then open **System Settings → Privacy & Security** and choose **Open Anyway**. You only need to do this once.
 - **The simulator or collection cannot be found:** Click the matching location in the sidebar and select it again. Choose the `OPTCGSim.app` bundle itself, not its contents.
 - **Changes do not appear:** Quit OPTCGSim before clicking **Refresh & Apply**, then start the simulator again.
 - **Want to undo changes?** Open the app and choose **Restore Originals**.
@@ -46,17 +47,9 @@ ARCHS="arm64 x86_64" VERSION=1.0.0 scripts/build-app.sh
 
 ## For maintainers: publishing a release
 
-The GitHub Actions release workflow runs when a tag such as `v1.0.0` is pushed. It validates the core logic, builds a universal app, signs it, submits it to Apple for notarization, staples the result, verifies the archive, and publishes the ZIP plus a SHA-256 checksum.
+The GitHub Actions release workflow runs when a tag such as `v1.0.0` is pushed. It validates the core logic, builds a universal app, verifies the archive, and publishes the ZIP plus a SHA-256 checksum.
 
-Before the first binary release, enroll in the Apple Developer Program and set these repository Actions secrets:
-
-- `MACOS_CERTIFICATE_BASE64` — base64-encoded Developer ID Application `.p12` certificate
-- `MACOS_CERTIFICATE_PASSWORD` — password used to export that certificate
-- `MACOS_KEYCHAIN_PASSWORD` — temporary CI keychain password
-- `MACOS_SIGNING_IDENTITY` — Developer ID Application certificate name
-- `APPLE_ID`, `APPLE_APP_PASSWORD`, and `APPLE_TEAM_ID` — Apple notarization credentials
-
-Do not create a release tag until those secrets are configured. The public source repository can be published before signing credentials are available.
+The downloadable app is unsigned and is not notarized by Apple. Its GitHub Release and these installation instructions are the source of trust; users must complete the one-time **Open Anyway** step above. No Apple Developer Program membership or repository secrets are required.
 
 ## License
 

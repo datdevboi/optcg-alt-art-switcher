@@ -238,6 +238,7 @@ private func validatePublicDistributionNotices() throws {
     try expect(appSource.contains("legally obtained simulator and card-art files"), "The app must explain that users provide their own assets")
     try expect(readme.contains("## Install on your Mac"), "The README must lead non-developers to installation instructions")
     try expect(readme.contains("[latest release](../../releases/latest)"), "The README must link users to the latest release")
+    try expect(readme.contains("Because the app is unsigned"), "The README must prepare users for the unsigned-app first launch")
     try expect(readme.contains("GNU General Public License v3.0"), "The README must identify the GPLv3 license")
 }
 

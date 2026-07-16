@@ -1,4 +1,4 @@
-name: Release macOS app
+name: Release unsigned macOS app
 
 on:
   push:
@@ -21,37 +21,8 @@ jobs:
       - name: Validate core behavior
         run: swift run AltArtCoreValidation
 
-      - name: Import Developer ID certificate
-        env:
-          CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
-        run: |
-          echo "$CERTIFICATE_BASE64" | base64 -D > "$RUNNER_TEMP/certificate.p12"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          security set-keychain-settings -lut 21600 build.keychain
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          security import "$RUNNER_TEMP/certificate.p12" -k build.keychain -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security list-keychain -d user -s build.keychain login.keychain
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" build.keychain
-
-      - name: Build and sign universal app
-        env:
-          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      - name: Build universal app
         run: scripts/build-app.sh
-
-      - name: Create notarization archive
-        run: ditto -c -k --sequesterRsrc --keepParent "dist/$APP_NAME.app" "$RUNNER_TEMP/$APP_NAME.zip"
-
-      - name: Notarize and staple app
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          xcrun notarytool submit "$RUNNER_TEMP/$APP_NAME.zip" --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
-          xcrun stapler staple "dist/$APP_NAME.app"
-          xcrun stapler validate "dist/$APP_NAME.app"
 
       - name: Package and verify release
         run: |
@@ -63,5 +34,11 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          body: |
+            ## Installation
+
+            This is an unsigned macOS app. After moving it to Applications, try to open it once. Then go to **System Settings → Privacy & Security** and choose **Open Anyway**. You only need to do this once.
+
+            Verify the ZIP with the included SHA-256 checksum if desired.
           generate_release_notes: true
           files: release/*

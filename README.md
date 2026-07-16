@@ -31,7 +31,7 @@ Updates are manual. Download the newest ZIP from the [Releases](../../releases) 
 This option is only for people comfortable using Terminal and Xcode Command Line Tools.
 
 ```sh
-git clone https://github.com/YOUR-GITHUB-USERNAME/optcg-alt-art-switcher.git
+git clone https://github.com/datdevboi/optcg-alt-art-switcher.git
 cd optcg-alt-art-switcher
 swift run AltArtCoreValidation
 scripts/build-app.sh

@@ -10,7 +10,8 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-14
+    # macos-15 includes Xcode/Swift 6, required by this package.
+    runs-on: macos-15
     env:
       APP_NAME: OPTCG Alt Art Switcher
       ARCHS: arm64 x86_64

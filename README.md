@@ -1,35 +1,68 @@
 # OPTCG Alt Art Switcher
 
-**A free, local macOS utility for reapplying your preferred One Piece TCG Simulator card art after a simulator update.** It never uploads your collection or changes the files in your source collection.
+**A free Mac app that puts your preferred One Piece TCG Simulator card art back after a simulator update.**
 
-> **Unofficial software:** OPTCG Alt Art Switcher is not affiliated with, endorsed by, or sponsored by Bandai, One Piece, or OPTCGSim. You must provide your own legally obtained simulator and card-art files. This project does not include or distribute card artwork or the simulator.
+It runs only on your Mac. It does not upload your collection or change the artwork files you keep in your collection folder.
+
+> **Unofficial tool:** OPTCG Alt Art Switcher is not made by, approved by, or connected with Bandai, One Piece, or OPTCGSim. You need your own legally obtained simulator and card-art files. This project does not include either one.
+
+## Before you start
+
+You need a Mac running macOS 13 (Ventura) or newer, your installed `OPTCGSim.app`, and your own **OP TCG Card Collection** folder.
+
+It works on both Apple Silicon Macs (M-series) and Intel Macs.
 
 ## Install on your Mac
 
-Requires macOS 13 (Ventura) or later, on either an Apple Silicon or Intel Mac.
+1. Visit the [latest release](../../releases/latest) and download the file ending in `.zip`.
+2. Double-click the ZIP file in Downloads.
+3. Drag **OPTCG Alt Art Switcher** into your **Applications** folder.
+4. Open it from Applications.
 
-1. Go to the [latest release](../../releases/latest) and download `OPTCG Alt Art Switcher-<version>.zip`.
-2. Double-click the downloaded ZIP file, then drag **OPTCG Alt Art Switcher** into your **Applications** folder.
-3. Open the app from Applications. Because the app is unsigned, macOS will block the first launch: go to **System Settings → Privacy & Security** and choose **Open Anyway**, then confirm **Open**. This is needed only once.
-4. Select your **OP TCG Card Collection** folder and your **OPTCGSim.app** application.
-5. Click **Refresh & Apply**. The app finds your artwork, saves the automatic choice for each card, and updates the simulator.
+### The first time you open it
 
-Use **Review** to choose a different version of any card, including DON cards. Use **Restore Originals** to undo the latest compatible installation session.
+Because the app is unsigned, macOS will block the first launch. This is normal for a free app downloaded outside the App Store.
 
-### Updating
+1. Try to open the app, then dismiss the message that appears.
+2. Open **System Settings → Privacy & Security**.
+3. Scroll down and click **Open Anyway** next to OPTCG Alt Art Switcher.
+4. Click **Open** to confirm.
 
-Updates are manual. Download the newest ZIP from the [Releases](../../releases) page, replace the copy in Applications, and open it normally. Your saved choices and backups remain in `~/Library/Application Support/OPTCGAltArtSwitcher`.
+You only need to do this once.
 
-### Troubleshooting
+## Use the app
 
-- **macOS says the app cannot be opened:** This is expected on the first launch because the app is unsigned. Make sure you downloaded it from this project’s Releases page, then open **System Settings → Privacy & Security** and choose **Open Anyway**. You only need to do this once.
-- **The simulator or collection cannot be found:** Click the matching location in the sidebar and select it again. Choose the `OPTCGSim.app` bundle itself, not its contents.
-- **Changes do not appear:** Quit OPTCGSim before clicking **Refresh & Apply**, then start the simulator again.
-- **Want to undo changes?** Open the app and choose **Restore Originals**.
+1. Choose your **OP TCG Card Collection** folder in the **Collection** area.
+2. Choose your `OPTCGSim.app` in the **Simulator** area.
+3. Quit OPTCGSim if it is open.
+4. Click **Refresh & Apply**.
 
-## Build from source (advanced)
+The app finds your artwork and chooses the best available version for each card. Your choices are saved, so opening the app again will remember them.
 
-This option is only for people comfortable using Terminal and Xcode Command Line Tools.
+### Pick different art
+
+Open **Review** to browse card art by set, choose a different version, or set your preferred DON card. Changes are installed automatically.
+
+### Undo your changes
+
+Choose **Restore Originals** in the app to put back the original simulator artwork from your most recent compatible installation session.
+
+## Updating the app
+
+Download the newest ZIP from the [Releases](../../releases) page and replace the older copy in Applications. Your saved choices and backups stay in place.
+
+## Need help?
+
+- **I cannot open the app:** Follow the one-time **Open Anyway** steps above. Only use this option if you downloaded the app from this project’s Releases page.
+- **I cannot find my simulator:** Choose the `OPTCGSim.app` application itself—not a folder inside it.
+- **My artwork did not change:** Quit OPTCGSim, click **Refresh & Apply**, then start the simulator again.
+- **I want to undo this:** Open the app and select **Restore Originals**.
+
+## For developers and maintainers
+
+### Build from source
+
+You need Terminal and Xcode Command Line Tools.
 
 ```sh
 git clone https://github.com/datdevboi/optcg-alt-art-switcher.git
@@ -39,17 +72,17 @@ scripts/build-app.sh
 open "dist/OPTCG Alt Art Switcher.app"
 ```
 
-For a release-quality universal app, build on a Mac with full Xcode installed:
+To build a release-quality app for both Apple Silicon and Intel Macs, use a Mac with full Xcode installed:
 
 ```sh
 ARCHS="arm64 x86_64" VERSION=1.0.0 scripts/build-app.sh
 ```
 
-## For maintainers: publishing a release
+### Publish a release
 
-The GitHub Actions release workflow runs when a tag such as `v1.0.0` is pushed. It validates the core logic, builds a universal app, verifies the archive, and publishes the ZIP plus a SHA-256 checksum.
+Push a tag such as `v1.0.0`. GitHub Actions validates the app, builds the download, creates a checksum, and publishes a GitHub Release.
 
-The downloadable app is unsigned and is not notarized by Apple. Its GitHub Release and these installation instructions are the source of trust; users must complete the one-time **Open Anyway** step above. No Apple Developer Program membership or repository secrets are required.
+The published app is unsigned and not notarized by Apple. Keep the first-launch instructions above in every release so users know how to open it safely.
 
 ## License
 

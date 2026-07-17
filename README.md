@@ -32,7 +32,9 @@ You only need to do this once.
 
 ## Use the app
 
-[Watch the video tutorial (MOV, 56 MB)](https://github.com/datdevboi/optcg-alt-art-switcher/releases/download/v1.0.1/alt.art.switcher.tutorial.mov)
+**Quick preview:** Browse your collection, choose the art you want, and the app applies it to the simulator.
+
+![OPTCG Alt Art Switcher preview](docs/alt-art-switcher-demo.gif)
 
 1. Choose your **OP TCG Card Collection** folder in the **Collection** area.
 2. Choose your `OPTCGSim.app` in the **Simulator** area.
